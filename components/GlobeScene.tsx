@@ -2,8 +2,12 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react'
 import gsap from 'gsap'
+import { SplitText } from 'gsap/SplitText'
+import { ScrambleTextPlugin } from 'gsap/ScrambleTextPlugin'
 import { Champion, TAG_COLORS, iconUrl } from '@/lib/riot'
 import ChampionModal from './ChampionModal'
+
+gsap.registerPlugin(SplitText, ScrambleTextPlugin)
 
 // ─── Config ────────────────────────────────────────────
 const RADIUS        = 250
@@ -44,9 +48,12 @@ function rotate(x: number, y: number, z: number, angY: number, angX: number) {
 interface Props { champions: Champion[]; version: string }
 
 export default function GlobeScene({ champions, version }: Props) {
-  const viewRef = useRef<HTMLDivElement>(null)
-  const miniRef = useRef<HTMLCanvasElement>(null)
-  const iconEls = useRef<(HTMLDivElement | null)[]>([])
+  const viewRef     = useRef<HTMLDivElement>(null)
+  const miniRef     = useRef<HTMLCanvasElement>(null)
+  const iconEls     = useRef<(HTMLDivElement | null)[]>([])
+  const subtitleRef = useRef<HTMLParagraphElement>(null)
+  const headingRef  = useRef<HTMLHeadingElement>(null)
+  const nameRef     = useRef<HTMLParagraphElement>(null)
   const base    = useRef(fibSphere(champions.length))
 
   // Rotation angles (degrees, mutable — no re-renders)
@@ -76,16 +83,65 @@ export default function GlobeScene({ champions, version }: Props) {
 
   useEffect(() => { base.current = fibSphere(champions.length) }, [champions.length])
 
-  // ── Load zoom ─────────────────────────────────────
+  // ── Load zoom + title entrance ────────────────────
   useEffect(() => {
     const vp = viewRef.current
     if (!vp) return
+
+    // Globe scale-in
     gsap.fromTo(
       vp,
       { scale: 0.55, opacity: 0 },
       { scale: 1,    opacity: 1, duration: 1.6, ease: 'power4.out' },
     )
+
+    // "League of Legends" — chars fall in with blur
+    if (subtitleRef.current) {
+      const split = SplitText.create(subtitleRef.current, { type: 'chars' })
+      gsap.fromTo(
+        split.chars,
+        { opacity: 0, y: -14, filter: 'blur(6px)' },
+        {
+          opacity: 1, y: 0, filter: 'blur(0px)',
+          stagger: 0.045, duration: 0.65, ease: 'power2.out', delay: 0.25,
+        },
+      )
+    }
+
+    // "Champions" — chars rise up with perspective tilt
+    if (headingRef.current) {
+      const split = SplitText.create(headingRef.current, { type: 'chars' })
+      gsap.set(headingRef.current, { perspective: 400 })
+      gsap.fromTo(
+        split.chars,
+        { opacity: 0, y: 28, rotateX: -70 },
+        {
+          opacity: 1, y: 0, rotateX: 0,
+          stagger: 0.055, duration: 0.85, ease: 'back.out(1.6)', delay: 0.55,
+        },
+      )
+    }
   }, [])
+
+  // ── ScrambleText on champion hover ────────────────
+  useEffect(() => {
+    const el = nameRef.current
+    if (!el) return
+    if (hovered) {
+      gsap.to(el, {
+        duration: 0.55,
+        scrambleText: {
+          text:      hovered.name,
+          chars:     'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+          speed:     0.55,
+          delimiter: '',
+        },
+      })
+    } else {
+      gsap.killTweensOf(el)
+      el.textContent = ''
+    }
+  }, [hovered])
 
   // ── Pointer events for drag ────────────────────────
   useEffect(() => {
@@ -224,104 +280,95 @@ export default function GlobeScene({ champions, version }: Props) {
     return () => gsap.ticker.remove(tick)
   }, [champions, filter])
 
-  // ── Mini-globe orientation indicator ──────────────
+  // ── Mini map: all champions as colored dots on a sphere ──
   useEffect(() => {
-    const STEPS = 60
-    const MR  = 33   // mini sphere radius (canvas px)
-    const MCX = 45   // canvas center
-    const MCY = 45
+    const PANEL = 150
+    const CR    = 62    // sphere radius in canvas px
+    const CX    = PANEL / 2
+    const CY    = PANEL / 2
 
-    /** Draw front+back segments of one circle with different styles. */
-    const drawRing = (
-      mctx: CanvasRenderingContext2D,
-      pts: { x: number; y: number; z: number }[],
-      frontColor: string,
-      backColor: string,
-      frontWidth = 0.55,
-    ) => {
-      for (let pass = 0; pass < 2; pass++) {
-        const front = pass === 0
-        mctx.strokeStyle = front ? frontColor : backColor
-        mctx.lineWidth   = front ? frontWidth : 0.35
-        mctx.setLineDash(front ? [] : [1.5, 3])
-        let pen = false
-        mctx.beginPath()
-        for (const p of pts) {
-          const show = front ? p.z >= 0 : p.z < 0
-          if (show) {
-            const sx = MCX + p.x, sy = MCY + p.y
-            if (!pen) { mctx.moveTo(sx, sy); pen = true } else mctx.lineTo(sx, sy)
-          } else if (pen) { mctx.stroke(); mctx.beginPath(); pen = false }
-        }
-        if (pen) mctx.stroke()
-      }
-      mctx.setLineDash([])
-    }
+    // Primary tag color per champion (stable across frames)
+    const colors = champions.map(c => TAG_COLORS[c.tags[0]] ?? '#c89b3c')
 
     const draw = () => {
       if (modalOpen.current) return
       const canvas = miniRef.current
       if (!canvas) return
-      const mctx = canvas.getContext('2d')
-      if (!mctx) return
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
 
       const radY = (angY.current * Math.PI) / 180
       const radX = (angX.current * Math.PI) / 180
 
-      mctx.clearRect(0, 0, 90, 90)
+      ctx.clearRect(0, 0, PANEL, PANEL)
 
-      // Dark background circle
-      mctx.beginPath()
-      mctx.arc(MCX, MCY, MR, 0, Math.PI * 2)
-      mctx.fillStyle = 'rgba(5,5,10,0.88)'
-      mctx.fill()
+      // ── Clip everything to the circle silhouette ──
+      ctx.save()
+      ctx.beginPath()
+      ctx.arc(CX, CY, CR, 0, Math.PI * 2)
+      ctx.clip()
 
-      // Latitude circles (-60 -30 0 30 60)
-      for (const latDeg of [-60, -30, 0, 30, 60]) {
-        const latR = (latDeg * Math.PI) / 180
-        const pts = Array.from({ length: STEPS + 1 }, (_, i) => {
-          const lon = (i / STEPS) * 2 * Math.PI
-          return rotate(
-            Math.cos(latR) * Math.cos(lon) * MR,
-            Math.sin(latR) * MR,
-            Math.cos(latR) * Math.sin(lon) * MR,
-            radY, radX,
-          )
-        })
-        const a = latDeg === 0 ? 0.55 : 0.22
-        drawRing(mctx, pts,
-          `rgba(200,155,60,${a})`,
-          `rgba(200,155,60,${(a * 0.3).toFixed(2)})`,
-          latDeg === 0 ? 0.7 : 0.5,
-        )
+      // Background
+      ctx.fillStyle = 'rgba(5,5,10,0.92)'
+      ctx.fillRect(0, 0, PANEL, PANEL)
+
+      // ── Project all champions and sort back→front ──
+      const items = champions.map((_, i) => {
+        const b = base.current[i]
+        const p = rotate(b.x * CR, b.y * CR, b.z * CR, radY, radX)
+        return { x: CX + p.x, y: CY + p.y, z: p.z, color: colors[i] }
+      })
+      items.sort((a, b) => a.z - b.z)
+
+      // Draw every champion — back face dimmer but always visible
+      for (const it of items) {
+        const front = it.z >= 0
+        ctx.beginPath()
+        ctx.arc(it.x, it.y, front ? 3 : 2, 0, Math.PI * 2)
+        ctx.globalAlpha = front ? 0.90 : 0.28
+        ctx.fillStyle = it.color
+        ctx.fill()
       }
+      ctx.globalAlpha = 1
 
-      // Longitude great circles (every 45°, only need 0-135 since 180+ mirror)
-      for (let lonDeg = 0; lonDeg < 180; lonDeg += 45) {
-        const lonR = (lonDeg * Math.PI) / 180
-        const pts = Array.from({ length: STEPS + 1 }, (_, i) => {
-          const lat = (i / STEPS) * 2 * Math.PI - Math.PI
-          return rotate(
-            Math.cos(lat) * Math.cos(lonR) * MR,
-            Math.sin(lat) * MR,
-            Math.cos(lat) * Math.sin(lonR) * MR,
-            radY, radX,
-          )
-        })
-        drawRing(mctx, pts, 'rgba(200,155,60,0.2)', 'rgba(200,155,60,0.06)')
+      // ── Faint equator line (front half only) ──
+      ctx.strokeStyle = 'rgba(200,155,60,0.28)'
+      ctx.lineWidth = 0.6
+      let pen = false
+      ctx.beginPath()
+      for (let i = 0; i <= 72; i++) {
+        const lon = (i / 72) * 2 * Math.PI
+        const p = rotate(Math.cos(lon) * CR, 0, Math.sin(lon) * CR, radY, radX)
+        if (p.z >= 0) {
+          const sx = CX + p.x, sy = CY + p.y
+          pen ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy)
+          pen = true
+        } else if (pen) {
+          ctx.stroke(); ctx.beginPath(); pen = false
+        }
       }
+      if (pen) ctx.stroke()
 
-      // Sphere outline ring
-      mctx.beginPath()
-      mctx.arc(MCX, MCY, MR, 0, Math.PI * 2)
-      mctx.strokeStyle = 'rgba(200,155,60,0.55)'
-      mctx.lineWidth = 0.8
-      mctx.stroke()
+      // ── Edge vignette — makes it read as a sphere ──
+      const vig = ctx.createRadialGradient(CX, CY, CR * 0.45, CX, CY, CR)
+      vig.addColorStop(0, 'rgba(0,0,0,0)')
+      vig.addColorStop(1, 'rgba(0,0,0,0.52)')
+      ctx.fillStyle = vig
+      ctx.fillRect(0, 0, PANEL, PANEL)
+
+      ctx.restore() // remove clip
+
+      // ── Gold rim outside the clip ──
+      ctx.beginPath()
+      ctx.arc(CX, CY, CR, 0, Math.PI * 2)
+      ctx.strokeStyle = 'rgba(200,155,60,0.60)'
+      ctx.lineWidth = 1
+      ctx.stroke()
     }
 
     gsap.ticker.add(draw)
     return () => gsap.ticker.remove(draw)
-  }, [])
+  }, [champions])
 
   // ── Click handler ─────────────────────────────────
   // First click  → globe zooms in (stays live, no modal)
@@ -411,16 +458,22 @@ export default function GlobeScene({ champions, version }: Props) {
 
       {/* Title */}
       <div className="fixed top-8 left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none select-none">
-        <p className="font-cinzel text-[9px] tracking-[0.5em] uppercase mb-2"
-           style={{ color: 'rgba(200,155,60,0.55)' }}>
+        <p
+          ref={subtitleRef}
+          className="font-cinzel text-[9px] tracking-[0.5em] uppercase mb-2"
+          style={{ color: 'rgba(200,155,60,0.55)' }}
+        >
           League of Legends
         </p>
-        <h1 className="font-cinzel font-black text-2xl md:text-3xl gold-text leading-none">
+        <h1
+          ref={headingRef}
+          className="font-cinzel font-black text-2xl md:text-3xl gold-text leading-none"
+        >
           Champions
         </h1>
       </div>
 
-      {/* Hovered name */}
+      {/* Hovered name — text controlled by ScrambleText, not React */}
       <div
         className="fixed left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none select-none"
         style={{
@@ -430,9 +483,10 @@ export default function GlobeScene({ champions, version }: Props) {
           transition: 'opacity 0.18s ease, transform 0.18s ease',
         }}
       >
-        <p className="font-cinzel text-white font-bold text-sm leading-tight">
-          {hovered?.name}
-        </p>
+        <p
+          ref={nameRef}
+          className="font-cinzel text-white font-bold text-sm leading-tight"
+        />
         <p className="font-cinzel text-[10px] tracking-widest uppercase mt-0.5"
            style={{ color: '#c89b3c' }}>
           {hovered?.title}
@@ -466,8 +520,8 @@ export default function GlobeScene({ champions, version }: Props) {
       {/* Mini globe orientation indicator */}
       <canvas
         ref={miniRef}
-        width={90}
-        height={90}
+        width={150}
+        height={150}
         className="mini-globe-canvas fixed z-20 pointer-events-none"
         style={{ right: '1.75rem', top: '50%', transform: 'translateY(-50%)' }}
       />
