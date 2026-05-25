@@ -1,0 +1,517 @@
+'use client'
+
+import { useRef, useEffect, useState, useCallback } from 'react'
+import gsap from 'gsap'
+import { Champion, TAG_COLORS, iconUrl } from '@/lib/riot'
+import ChampionModal from './ChampionModal'
+
+// ─── Config ────────────────────────────────────────────
+const RADIUS        = 250
+const ICON          = 36
+const HALF          = ICON / 2
+const AUTO_SPEED    = 0        // auto-rotate disabled
+const PERSP         = 900
+const DRAG_SENS_Y   = 0.18   // horizontal drag → Y rotation
+const DRAG_SENS_X   = 0.14   // vertical drag   → X rotation
+const FRICTION_Y    = 0.97   // momentum decay Y  (higher = glides longer)
+const FRICTION_X    = 0.94   // momentum decay X  (higher = glides longer)
+const DRAG_THRESH   = 5      // px before we consider it a drag
+const ZOOMED_SCALE  = 5      // viewport scale when globe is in "zoomed" state
+
+const TAGS = ['All', 'Fighter', 'Tank', 'Mage', 'Assassin', 'Marksman', 'Support']
+
+// ─── Helpers ───────────────────────────────────────────
+function fibSphere(n: number) {
+  const phi = Math.PI * (3 - Math.sqrt(5))
+  return Array.from({ length: n }, (_, i) => {
+    const y = 1 - (i / (n - 1)) * 2
+    const r = Math.sqrt(1 - y * y)
+    return { x: Math.cos(phi * i) * r, y, z: Math.sin(phi * i) * r }
+  })
+}
+
+function rotate(x: number, y: number, z: number, angY: number, angX: number) {
+  const cosY = Math.cos(angY), sinY = Math.sin(angY)
+  const rx   = x * cosY + z * sinY
+  const rz1  = -x * sinY + z * cosY
+  const cosX = Math.cos(angX), sinX = Math.sin(angX)
+  const ry   = y * cosX - rz1 * sinX
+  const rz   = y * sinX + rz1 * cosX
+  return { x: rx, y: ry, z: rz }
+}
+
+// ─── Component ─────────────────────────────────────────
+interface Props { champions: Champion[]; version: string }
+
+export default function GlobeScene({ champions, version }: Props) {
+  const viewRef = useRef<HTMLDivElement>(null)
+  const miniRef = useRef<HTMLCanvasElement>(null)
+  const iconEls = useRef<(HTMLDivElement | null)[]>([])
+  const base    = useRef(fibSphere(champions.length))
+
+  // Rotation angles (degrees, mutable — no re-renders)
+  const angY    = useRef(0)
+  const angX    = useRef(-8)
+  const targetX = useRef(-8)    // mouse-Y resting target for X tilt
+
+  // Drag state
+  const isDown  = useRef(false)
+  const hadDrag = useRef(false)  // true if pointer moved > threshold this cycle
+  const dragLast = useRef({ x: 0, y: 0 })
+  const dragStart = useRef({ x: 0, y: 0 })
+
+  // Inertia velocities
+  const velY = useRef(0)
+  const velX = useRef(0)
+
+  // Modal pause flag
+  const modalOpen = useRef(false)
+  const isZoomed  = useRef(false)   // true after first click (globe zoomed in)
+
+  const [cursor,   setCursor]   = useState<'grab' | 'grabbing'>('grab')
+  const [hovered,  setHovered]  = useState<Champion | null>(null)
+  const [selected, setSelected] = useState<Champion | null>(null)
+  const [origin,   setOrigin]   = useState<DOMRect  | null>(null)
+  const [filter,   setFilter]   = useState('All')
+
+  useEffect(() => { base.current = fibSphere(champions.length) }, [champions.length])
+
+  // ── Load zoom ─────────────────────────────────────
+  useEffect(() => {
+    const vp = viewRef.current
+    if (!vp) return
+    gsap.fromTo(
+      vp,
+      { scale: 0.55, opacity: 0 },
+      { scale: 1,    opacity: 1, duration: 1.6, ease: 'power4.out' },
+    )
+  }, [])
+
+  // ── Pointer events for drag ────────────────────────
+  useEffect(() => {
+    const vp = viewRef.current
+    if (!vp) return
+
+    const onDown = (e: PointerEvent) => {
+      isDown.current  = true
+      hadDrag.current = false
+      velY.current    = 0
+      velX.current    = 0
+      dragStart.current = { x: e.clientX, y: e.clientY }
+      dragLast.current  = { x: e.clientX, y: e.clientY }
+      setCursor('grabbing')
+    }
+
+    const onMove = (e: PointerEvent) => {
+      if (!isDown.current) {
+        // Passive hover: tilt globe based on mouse Y
+        if (!modalOpen.current) {
+          targetX.current = -8 + (e.clientY / window.innerHeight - 0.5) * -36
+        }
+        return
+      }
+
+      const dx = e.clientX - dragLast.current.x
+      const dy = e.clientY - dragLast.current.y
+      const dist = Math.hypot(
+        e.clientX - dragStart.current.x,
+        e.clientY - dragStart.current.y,
+      )
+
+      if (dist > DRAG_THRESH) hadDrag.current = true
+
+      if (hadDrag.current) {
+        // Scale sensitivity down when viewport is zoomed so apparent speed stays constant
+        const currentScale = isZoomed.current ? ZOOMED_SCALE : 1
+        const sensY = DRAG_SENS_Y / currentScale
+        const sensX = DRAG_SENS_X / currentScale
+
+        angY.current += dx * sensY
+        angX.current += dy * sensX
+
+        // Clamp X so globe doesn't flip upside down
+        angX.current = Math.max(-60, Math.min(60, angX.current))
+
+        // Store velocity for momentum
+        velY.current = dx * sensY
+        velX.current = dy * sensX
+
+        // Keep targetX in sync so there's no snap when drag ends
+        targetX.current = angX.current
+
+        dragLast.current = { x: e.clientX, y: e.clientY }
+      }
+    }
+
+    const onUp = () => {
+      isDown.current = false
+      setCursor('grab')
+      // velocities continue in tick (inertia)
+    }
+
+    vp.addEventListener('pointerdown', onDown)
+    vp.addEventListener('pointermove', onMove)
+    vp.addEventListener('pointerup',   onUp)
+    vp.addEventListener('pointerleave', onUp)
+
+    return () => {
+      vp.removeEventListener('pointerdown', onDown)
+      vp.removeEventListener('pointermove', onMove)
+      vp.removeEventListener('pointerup',   onUp)
+      vp.removeEventListener('pointerleave', onUp)
+    }
+  }, [])
+
+  // ── 3D animation tick ─────────────────────────────
+  useEffect(() => {
+    const tick = () => {
+      if (modalOpen.current) return
+
+      const dragging = isDown.current && hadDrag.current
+
+      if (!dragging) {
+        // Auto-rotate Y
+        angY.current += AUTO_SPEED
+
+        // Apply inertia
+        angY.current += velY.current
+        angX.current += velX.current
+        velY.current *= FRICTION_Y
+        velX.current *= FRICTION_X
+
+        // Clamp X
+        angX.current = Math.max(-60, Math.min(60, angX.current))
+
+        // Spring X toward mouse-target (only when inertia is tiny)
+        const xInertiaSmall = Math.abs(velX.current) < 0.05
+        if (xInertiaSmall) {
+          angX.current += (targetX.current - angX.current) * 0.04
+        }
+      }
+
+      const radY = (angY.current * Math.PI) / 180
+      const radX = (angX.current * Math.PI) / 180
+      const cx   = window.innerWidth  / 2
+      const cy   = window.innerHeight / 2
+
+      for (let i = 0; i < champions.length; i++) {
+        const el = iconEls.current[i]
+        if (!el) continue
+
+        const b = base.current[i]
+        const { x, y, z } = rotate(
+          b.x * RADIUS, b.y * RADIUS, b.z * RADIUS, radY, radX,
+        )
+
+        const scale  = Math.max(0.25, PERSP / (PERSP - z))
+        const sx     = x * scale
+        const sy     = y * scale
+        const tx     = cx + sx - HALF
+        const ty     = cy + sy - HALF
+        const depth  = (z + RADIUS) / (RADIUS * 2)
+        const vis    = filter === 'All' || champions[i].tags.includes(filter)
+        const opacity = vis ? Math.max(0.04, depth) : 0.03
+        const blur    = z < 0 ? ((-z / RADIUS) * 1.5).toFixed(1) : '0'
+
+        el.style.transform = `translate(${tx.toFixed(1)}px,${ty.toFixed(1)}px) scale(${scale.toFixed(3)})`
+        el.style.opacity   = opacity.toFixed(2)
+        el.style.zIndex    = String(Math.round(z + RADIUS))
+        el.style.filter    = blur !== '0' ? `blur(${blur}px)` : 'none'
+      }
+    }
+
+    gsap.ticker.add(tick)
+    return () => gsap.ticker.remove(tick)
+  }, [champions, filter])
+
+  // ── Mini-globe orientation indicator ──────────────
+  useEffect(() => {
+    const STEPS = 60
+    const MR  = 33   // mini sphere radius (canvas px)
+    const MCX = 45   // canvas center
+    const MCY = 45
+
+    /** Draw front+back segments of one circle with different styles. */
+    const drawRing = (
+      mctx: CanvasRenderingContext2D,
+      pts: { x: number; y: number; z: number }[],
+      frontColor: string,
+      backColor: string,
+      frontWidth = 0.55,
+    ) => {
+      for (let pass = 0; pass < 2; pass++) {
+        const front = pass === 0
+        mctx.strokeStyle = front ? frontColor : backColor
+        mctx.lineWidth   = front ? frontWidth : 0.35
+        mctx.setLineDash(front ? [] : [1.5, 3])
+        let pen = false
+        mctx.beginPath()
+        for (const p of pts) {
+          const show = front ? p.z >= 0 : p.z < 0
+          if (show) {
+            const sx = MCX + p.x, sy = MCY + p.y
+            if (!pen) { mctx.moveTo(sx, sy); pen = true } else mctx.lineTo(sx, sy)
+          } else if (pen) { mctx.stroke(); mctx.beginPath(); pen = false }
+        }
+        if (pen) mctx.stroke()
+      }
+      mctx.setLineDash([])
+    }
+
+    const draw = () => {
+      if (modalOpen.current) return
+      const canvas = miniRef.current
+      if (!canvas) return
+      const mctx = canvas.getContext('2d')
+      if (!mctx) return
+
+      const radY = (angY.current * Math.PI) / 180
+      const radX = (angX.current * Math.PI) / 180
+
+      mctx.clearRect(0, 0, 90, 90)
+
+      // Dark background circle
+      mctx.beginPath()
+      mctx.arc(MCX, MCY, MR, 0, Math.PI * 2)
+      mctx.fillStyle = 'rgba(5,5,10,0.88)'
+      mctx.fill()
+
+      // Latitude circles (-60 -30 0 30 60)
+      for (const latDeg of [-60, -30, 0, 30, 60]) {
+        const latR = (latDeg * Math.PI) / 180
+        const pts = Array.from({ length: STEPS + 1 }, (_, i) => {
+          const lon = (i / STEPS) * 2 * Math.PI
+          return rotate(
+            Math.cos(latR) * Math.cos(lon) * MR,
+            Math.sin(latR) * MR,
+            Math.cos(latR) * Math.sin(lon) * MR,
+            radY, radX,
+          )
+        })
+        const a = latDeg === 0 ? 0.55 : 0.22
+        drawRing(mctx, pts,
+          `rgba(200,155,60,${a})`,
+          `rgba(200,155,60,${(a * 0.3).toFixed(2)})`,
+          latDeg === 0 ? 0.7 : 0.5,
+        )
+      }
+
+      // Longitude great circles (every 45°, only need 0-135 since 180+ mirror)
+      for (let lonDeg = 0; lonDeg < 180; lonDeg += 45) {
+        const lonR = (lonDeg * Math.PI) / 180
+        const pts = Array.from({ length: STEPS + 1 }, (_, i) => {
+          const lat = (i / STEPS) * 2 * Math.PI - Math.PI
+          return rotate(
+            Math.cos(lat) * Math.cos(lonR) * MR,
+            Math.sin(lat) * MR,
+            Math.cos(lat) * Math.sin(lonR) * MR,
+            radY, radX,
+          )
+        })
+        drawRing(mctx, pts, 'rgba(200,155,60,0.2)', 'rgba(200,155,60,0.06)')
+      }
+
+      // Sphere outline ring
+      mctx.beginPath()
+      mctx.arc(MCX, MCY, MR, 0, Math.PI * 2)
+      mctx.strokeStyle = 'rgba(200,155,60,0.55)'
+      mctx.lineWidth = 0.8
+      mctx.stroke()
+    }
+
+    gsap.ticker.add(draw)
+    return () => gsap.ticker.remove(draw)
+  }, [])
+
+  // ── Click handler ─────────────────────────────────
+  // First click  → globe zooms in (stays live, no modal)
+  // Second click → globe rushes forward, then modal opens
+  const handleIconClick = useCallback((champ: Champion, el: HTMLDivElement) => {
+    if (hadDrag.current) return
+
+    if (!isZoomed.current) {
+      // ── First click: zoom globe toward viewer, stay there
+      isZoomed.current = true
+      viewRef.current?.classList.add('zoomed')
+      gsap.to(viewRef.current, {
+        scale: ZOOMED_SCALE,
+        duration: 0.8,
+        ease: 'power3.out',
+      })
+      return
+    }
+
+    // ── Second click: rush forward and open modal
+    const tl = gsap.timeline()
+
+    // Phase 1 — globe rushes to fill screen
+    tl.to(viewRef.current, {
+      scale: 6,
+      duration: 0.6,
+      ease: 'power3.in',
+    })
+
+    // Phase 2 — quick fade out at peak
+    tl.to(viewRef.current, {
+      opacity: 0,
+      duration: 0.1,
+      ease: 'none',
+      onComplete: () => {
+        const rect = el.getBoundingClientRect()
+        gsap.set(viewRef.current, { scale: 0.75, opacity: 0 })
+        modalOpen.current = true
+        isZoomed.current  = false
+        setOrigin(rect)
+        setSelected(champ)
+      },
+    })
+  }, [])
+
+  // ── Click on globe background: zoom back out ──────
+  const handleViewportClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isZoomed.current || hadDrag.current) return
+    const clickedIcon = (e.target as Element).closest('.globe-icon')
+    if (!clickedIcon) {
+      isZoomed.current = false
+      viewRef.current?.classList.remove('zoomed')
+      gsap.to(viewRef.current, { scale: 1, duration: 0.55, ease: 'power3.out' })
+    }
+  }, [])
+
+  const handleClose = useCallback(() => {
+    setSelected(null)
+    setOrigin(null)
+
+    // Resume ticker right away (globe rotates while invisible)
+    modalOpen.current = false
+    isZoomed.current  = false
+    viewRef.current?.classList.remove('zoomed')
+    iconEls.current.forEach((el) => {
+      if (el) gsap.set(el, { clearProps: 'scale,opacity' })
+    })
+
+    // Zoom globe back in once modal finishes closing (~0.65s clip-path anim)
+    gsap.fromTo(
+      viewRef.current,
+      { scale: 0.75, opacity: 0 },
+      { scale: 1, opacity: 1, duration: 0.6, ease: 'power3.out', delay: 0.5 },
+    )
+  }, [])
+
+  return (
+    <>
+      {/* Ambient glow */}
+      <div
+        className="fixed inset-0 pointer-events-none z-0"
+        style={{
+          background:
+            'radial-gradient(ellipse 65% 55% at 50% 50%, rgba(200,155,60,0.05) 0%, transparent 70%)',
+        }}
+      />
+
+      {/* Title */}
+      <div className="fixed top-8 left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none select-none">
+        <p className="font-cinzel text-[9px] tracking-[0.5em] uppercase mb-2"
+           style={{ color: 'rgba(200,155,60,0.55)' }}>
+          League of Legends
+        </p>
+        <h1 className="font-cinzel font-black text-2xl md:text-3xl gold-text leading-none">
+          Champions
+        </h1>
+      </div>
+
+      {/* Hovered name */}
+      <div
+        className="fixed left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none select-none"
+        style={{
+          bottom: '5.5rem',
+          opacity: hovered ? 1 : 0,
+          transform: `translateX(-50%) translateY(${hovered ? 0 : 8}px)`,
+          transition: 'opacity 0.18s ease, transform 0.18s ease',
+        }}
+      >
+        <p className="font-cinzel text-white font-bold text-sm leading-tight">
+          {hovered?.name}
+        </p>
+        <p className="font-cinzel text-[10px] tracking-widest uppercase mt-0.5"
+           style={{ color: '#c89b3c' }}>
+          {hovered?.title}
+        </p>
+      </div>
+
+      {/* Filters */}
+      <div className="fixed bottom-7 left-1/2 -translate-x-1/2 z-20 flex gap-1.5 flex-wrap justify-center max-w-lg">
+        {TAGS.map((tag) => (
+          <button
+            key={tag}
+            onClick={() => setFilter(tag)}
+            className="font-cinzel text-[9px] tracking-widest uppercase px-3 py-1.5 border transition-colors duration-200"
+            style={{
+              borderColor: filter === tag
+                ? (TAG_COLORS[tag] ?? '#c89b3c')
+                : 'rgba(255,255,255,0.10)',
+              color: filter === tag
+                ? (TAG_COLORS[tag] ?? '#c89b3c')
+                : 'rgba(255,255,255,0.30)',
+              background:           'rgba(5,5,10,0.75)',
+              backdropFilter:       'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+            }}
+          >
+            {tag}
+          </button>
+        ))}
+      </div>
+
+      {/* Mini globe orientation indicator */}
+      <canvas
+        ref={miniRef}
+        width={90}
+        height={90}
+        className="mini-globe-canvas fixed z-20 pointer-events-none"
+        style={{ right: '1.75rem', top: '50%', transform: 'translateY(-50%)' }}
+      />
+
+      {/* Globe */}
+      <div
+        ref={viewRef}
+        className="globe-viewport"
+        style={{ opacity: 0, cursor }}
+        onClick={handleViewportClick}
+      >
+        {champions.map((champ, i) => (
+          <div
+            key={champ.id}
+            ref={(el) => { iconEls.current[i] = el }}
+            className="globe-icon"
+            onMouseEnter={() => setHovered(champ)}
+            onMouseLeave={() => setHovered(null)}
+            onClick={() => {
+              const el = iconEls.current[i]
+              if (el) handleIconClick(champ, el)
+            }}
+          >
+            <img
+              src={iconUrl(version, champ.image.full)}
+              alt={champ.name}
+              width={ICON}
+              height={ICON}
+              draggable={false}
+            />
+            <span className="globe-icon-name">{champ.name}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Modal */}
+      {selected && origin && (
+        <ChampionModal
+          champion={selected}
+          version={version}
+          originRect={origin}
+          onClose={handleClose}
+        />
+      )}
+    </>
+  )
+}
