@@ -15,12 +15,16 @@ const ICON          = 36
 const HALF          = ICON / 2
 const AUTO_SPEED    = 0        // auto-rotate disabled
 const PERSP         = 900
+const BASE_SCALE    = 3      // resting viewport scale (globe appears 3× larger)
 const DRAG_SENS_Y   = 0.18   // horizontal drag → Y rotation
 const DRAG_SENS_X   = 0.14   // vertical drag   → X rotation
 const FRICTION_Y    = 0.97   // momentum decay Y  (higher = glides longer)
 const FRICTION_X    = 0.94   // momentum decay X  (higher = glides longer)
 const DRAG_THRESH   = 5      // px before we consider it a drag
 const ZOOMED_SCALE  = 5      // viewport scale when globe is in "zoomed" state
+const MIN_SCALE     = 1      // scroll zoom minimum
+const MAX_SCALE     = 10     // scroll zoom maximum
+const SCROLL_STEP   = 0.5    // scale change per scroll tick
 
 const TAGS = ['All', 'Fighter', 'Tank', 'Mage', 'Assassin', 'Marksman', 'Support']
 
@@ -57,9 +61,8 @@ export default function GlobeScene({ champions, version }: Props) {
   const base    = useRef(fibSphere(champions.length))
 
   // Rotation angles (degrees, mutable — no re-renders)
-  const angY    = useRef(0)
-  const angX    = useRef(-8)
-  const targetX = useRef(-8)    // mouse-Y resting target for X tilt
+  const angY = useRef(0)
+  const angX = useRef(-8)
 
   // Drag state
   const isDown  = useRef(false)
@@ -72,8 +75,9 @@ export default function GlobeScene({ champions, version }: Props) {
   const velX = useRef(0)
 
   // Modal pause flag
-  const modalOpen = useRef(false)
-  const isZoomed  = useRef(false)   // true after first click (globe zoomed in)
+  const modalOpen  = useRef(false)
+  const isZoomed   = useRef(false)          // true when globe is zoomed in
+  const viewScale  = useRef(BASE_SCALE)     // current viewport scale
 
   const [cursor,   setCursor]   = useState<'grab' | 'grabbing'>('grab')
   const [hovered,  setHovered]  = useState<Champion | null>(null)
@@ -91,8 +95,8 @@ export default function GlobeScene({ champions, version }: Props) {
     // Globe scale-in
     gsap.fromTo(
       vp,
-      { scale: 0.55, opacity: 0 },
-      { scale: 1,    opacity: 1, duration: 1.6, ease: 'power4.out' },
+      { scale: BASE_SCALE * 0.55, opacity: 0 },
+      { scale: BASE_SCALE,       opacity: 1, duration: 1.6, ease: 'power4.out' },
     )
 
     // "League of Legends" — chars fall in with blur
@@ -159,13 +163,7 @@ export default function GlobeScene({ champions, version }: Props) {
     }
 
     const onMove = (e: PointerEvent) => {
-      if (!isDown.current) {
-        // Passive hover: tilt globe based on mouse Y
-        if (!modalOpen.current) {
-          targetX.current = -8 + (e.clientY / window.innerHeight - 0.5) * -36
-        }
-        return
-      }
+      if (!isDown.current) return  // only move on active drag
 
       const dx = e.clientX - dragLast.current.x
       const dy = e.clientY - dragLast.current.y
@@ -177,10 +175,9 @@ export default function GlobeScene({ champions, version }: Props) {
       if (dist > DRAG_THRESH) hadDrag.current = true
 
       if (hadDrag.current) {
-        // Scale sensitivity down when viewport is zoomed so apparent speed stays constant
-        const currentScale = isZoomed.current ? ZOOMED_SCALE : 1
-        const sensY = DRAG_SENS_Y / currentScale
-        const sensX = DRAG_SENS_X / currentScale
+        // Sensitivity scales down with zoom so apparent speed stays constant
+        const sensY = DRAG_SENS_Y / viewScale.current
+        const sensX = DRAG_SENS_X / viewScale.current
 
         angY.current += dx * sensY
         angX.current += dy * sensX
@@ -192,9 +189,6 @@ export default function GlobeScene({ champions, version }: Props) {
         velY.current = dx * sensY
         velX.current = dy * sensX
 
-        // Keep targetX in sync so there's no snap when drag ends
-        targetX.current = angX.current
-
         dragLast.current = { x: e.clientX, y: e.clientY }
       }
     }
@@ -205,16 +199,36 @@ export default function GlobeScene({ champions, version }: Props) {
       // velocities continue in tick (inertia)
     }
 
-    vp.addEventListener('pointerdown', onDown)
-    vp.addEventListener('pointermove', onMove)
-    vp.addEventListener('pointerup',   onUp)
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      if (modalOpen.current) return
+
+      const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE,
+        viewScale.current + (e.deltaY < 0 ? SCROLL_STEP : -SCROLL_STEP),
+      ))
+      if (next === viewScale.current) return
+
+      viewScale.current = next
+      isZoomed.current  = next > BASE_SCALE
+      viewRef.current?.classList.toggle('zoomed', isZoomed.current)
+
+      gsap.to(viewRef.current, {
+        scale: next, duration: 0.35, ease: 'power2.out', overwrite: 'auto',
+      })
+    }
+
+    vp.addEventListener('pointerdown',  onDown)
+    vp.addEventListener('pointermove',  onMove)
+    vp.addEventListener('pointerup',    onUp)
     vp.addEventListener('pointerleave', onUp)
+    vp.addEventListener('wheel',        onWheel, { passive: false })
 
     return () => {
-      vp.removeEventListener('pointerdown', onDown)
-      vp.removeEventListener('pointermove', onMove)
-      vp.removeEventListener('pointerup',   onUp)
+      vp.removeEventListener('pointerdown',  onDown)
+      vp.removeEventListener('pointermove',  onMove)
+      vp.removeEventListener('pointerup',    onUp)
       vp.removeEventListener('pointerleave', onUp)
+      vp.removeEventListener('wheel',        onWheel)
     }
   }, [])
 
@@ -237,12 +251,6 @@ export default function GlobeScene({ champions, version }: Props) {
 
         // Clamp X
         angX.current = Math.max(-60, Math.min(60, angX.current))
-
-        // Spring X toward mouse-target (only when inertia is tiny)
-        const xInertiaSmall = Math.abs(velX.current) < 0.05
-        if (xInertiaSmall) {
-          angX.current += (targetX.current - angX.current) * 0.04
-        }
       }
 
       const radY = (angY.current * Math.PI) / 180
@@ -379,6 +387,7 @@ export default function GlobeScene({ champions, version }: Props) {
     if (!isZoomed.current) {
       // ── First click: zoom globe toward viewer, stay there
       isZoomed.current = true
+      viewScale.current = ZOOMED_SCALE
       viewRef.current?.classList.add('zoomed')
       gsap.to(viewRef.current, {
         scale: ZOOMED_SCALE,
@@ -405,7 +414,7 @@ export default function GlobeScene({ champions, version }: Props) {
       ease: 'none',
       onComplete: () => {
         const rect = el.getBoundingClientRect()
-        gsap.set(viewRef.current, { scale: 0.75, opacity: 0 })
+        gsap.set(viewRef.current, { scale: BASE_SCALE * 0.25, opacity: 0 })
         modalOpen.current = true
         isZoomed.current  = false
         setOrigin(rect)
@@ -419,9 +428,10 @@ export default function GlobeScene({ champions, version }: Props) {
     if (!isZoomed.current || hadDrag.current) return
     const clickedIcon = (e.target as Element).closest('.globe-icon')
     if (!clickedIcon) {
-      isZoomed.current = false
+      isZoomed.current  = false
+      viewScale.current = BASE_SCALE
       viewRef.current?.classList.remove('zoomed')
-      gsap.to(viewRef.current, { scale: 1, duration: 0.55, ease: 'power3.out' })
+      gsap.to(viewRef.current, { scale: BASE_SCALE, duration: 0.55, ease: 'power3.out' })
     }
   }, [])
 
@@ -432,6 +442,7 @@ export default function GlobeScene({ champions, version }: Props) {
     // Resume ticker right away (globe rotates while invisible)
     modalOpen.current = false
     isZoomed.current  = false
+    viewScale.current = BASE_SCALE
     viewRef.current?.classList.remove('zoomed')
     iconEls.current.forEach((el) => {
       if (el) gsap.set(el, { clearProps: 'scale,opacity' })
@@ -440,8 +451,8 @@ export default function GlobeScene({ champions, version }: Props) {
     // Zoom globe back in once modal finishes closing (~0.65s clip-path anim)
     gsap.fromTo(
       viewRef.current,
-      { scale: 0.75, opacity: 0 },
-      { scale: 1, opacity: 1, duration: 0.6, ease: 'power3.out', delay: 0.5 },
+      { scale: BASE_SCALE * 0.25, opacity: 0 },
+      { scale: BASE_SCALE, opacity: 1, duration: 0.6, ease: 'power3.out', delay: 0.5 },
     )
   }, [])
 
@@ -473,13 +484,13 @@ export default function GlobeScene({ champions, version }: Props) {
         </h1>
       </div>
 
-      {/* Hovered name — text controlled by ScrambleText, not React */}
+      {/* Hovered name — full-width so text-align:center always hits true center */}
       <div
-        className="fixed left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none select-none"
+        className="fixed inset-x-0 z-20 text-center pointer-events-none select-none"
         style={{
           bottom: '5.5rem',
           opacity: hovered ? 1 : 0,
-          transform: `translateX(-50%) translateY(${hovered ? 0 : 8}px)`,
+          transform: `translateY(${hovered ? 0 : 8}px)`,
           transition: 'opacity 0.18s ease, transform 0.18s ease',
         }}
       >

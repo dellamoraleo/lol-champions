@@ -60,14 +60,20 @@ html, body {
 .globe-icon-name {
   position: absolute;
   top: 40px;
-  left: 50%;
+
+  /* Center a fixed-width box on the icon's midpoint (18px = half of 36px icon).
+     The fixed width prevents translateX(-50%) from varying per text length,
+     guaranteeing every name sits exactly centered under its icon. */
+  left: 18px;
+  width: 160px;
   transform: translateX(-50%);
+
+  text-align: center;
   white-space: nowrap;
   font-family: 'Cinzel', serif;
   font-size: 5.5px;
   letter-spacing: 0.07em;
   color: rgba(232, 224, 208, 0.92);
-  text-align: center;
   pointer-events: none;
   user-select: none;
   opacity: 0;
